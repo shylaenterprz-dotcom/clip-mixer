@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Clip Mixer – Video Editor</title>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f3f1ee;--surf:#fff;--ink:#1b1d24;--mute:#6b6f7b;--line:#d9d6d0;--vid:#0f8a86;--aud:#d6456b;--sel:#1b1d24;--stage:#14151a;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15161b;--surf:#1f2128;--ink:#ecebe8;--mute:#9a9ea9;--line:#34363f;--vid:#2bc0ba;--aud:#f0698d;--sel:#ecebe8;--stage:#0a0a0d;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#15161b;--surf:#1f2128;--ink:#ecebe8;--mute:#9a9ea9;--line:#34363f;--vid:#2bc0ba;--aud:#f0698d;--sel:#ecebe8;--stage:#0a0a0d;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 "Bricolage Grotesque",system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:860px;margin:0 auto;padding:14px 14px 40px}
+h1{font-size:20px;margin:4px 0 12px;font-weight:700}
+.stage{background:var(--stage);border-radius:10px;overflow:hidden;aspect-ratio:16/9;position:relative}
+canvas{width:100%;height:100%;display:block}
+.bar{display:flex;gap:10px;align-items:center;margin:10px 0}
+button,label.btn{font:inherit;font-weight:600;border:1px solid var(--line);background:var(--surf);color:var(--ink);border-radius:8px;padding:9px 13px;cursor:pointer;min-height:40px}
+button:focus-visible,label.btn:focus-within,input:focus-visible{outline:2px solid var(--vid);outline-offset:2px}
+button.pri{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button:disabled{opacity:.45;cursor:default}
+.time{font-variant-numeric:tabular-nums;color:var(--mute);min-width:96px;text-align:right}
+input[type=range]{width:100%;accent-color:var(--vid)}
+.lane{position:relative;height:50px;background:var(--surf);border:1px solid var(--line);border-radius:8px;margin:6px 0;overflow:hidden}
+.lane-h{display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-weight:600}
+.lane-h span{color:var(--mute);font-weight:400;font-size:13px}
+.blk{position:absolute;top:5px;bottom:5px;border-radius:6px;color:#fff;font-size:12px;padding:4px 7px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;border:2px solid transparent;background:var(--vid)}
+.blk.a{background:var(--aud)}
+.blk.on{border-color:var(--sel);box-shadow:0 0 0 2px var(--surf) inset}
+.ph{position:absolute;top:0;bottom:0;width:2px;background:var(--ink);pointer-events:none;z-index:3}
+.lanes{position:relative}
+.lanes .ph{top:0;bottom:0}
+.insp{background:var(--surf);border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:14px}
+.insp h2{font-size:15px;margin:0 0 8px}
+.row{display:grid;grid-template-columns:92px 1fr 56px;gap:8px;align-items:center;margin:6px 0}
+.row output{text-align:right;color:var(--mute);font-variant-numeric:tabular-nums;font-size:13px}
+.empty{color:var(--mute);margin:0;font-size:14px}
+.acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.out{margin-top:14px}
+.out video{width:100%;border-radius:10px;background:#000}
+.msg{color:var(--mute);font-size:13px;margin:6px 0}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
+@media (prefers-reduced-motion:no-preference){button{transition:background .15s}}
+</style>
+</head>
+<body>
+<main>
+<h1>Clip Mixer</h1>
+<div class="stage"><canvas id="cv" width="1280" height="720"></canvas></div>
+<div class="bar">
+  <button id="play" class="pri">Play</button>
+  <input id="scrub" type="range" min="0" max="0" step="0.01" value="0" aria-label="Timeline position">
+  <span class="time" id="time">0:00.0 / 0:00.0</span>
+</div>
+<div class="bar" style="flex-wrap:wrap">
+  <label class="btn">Video clips jodo<input id="fv" type="file" accept="video/*" multiple></label>
+  <label class="btn">Audio jodo<input id="fa" type="file" accept="audio/*" multiple></label>
+  <button id="exp" disabled>Export video</button>
+</div>
+
+<div class="lanes" id="lanes">
+  <div class="lane-h">Video clips <span id="vl"></span></div>
+  <div class="lane" id="lv"></div>
+  <div class="lane-h">Audio tracks <span>block ko drag karke position badlo</span></div>
+  <div class="lane" id="la"></div>
+</div>
+
+<div class="insp" id="insp"><p class="empty">Pehle video clips ya audio jodo, fir timeline par kisi block ko chuno aur trim / volume set karo.</p></div>
+<p class="msg" id="msg"></p>
+<div class="out" id="out"></div>
+</main>
+
+<script>
+/* APK shim: native save via Filesystem + Share */
+if(!window.claude&&window.Capacitor){window.claude={use:async()=>({save:async({filename,data})=>{
+ const P=Capacitor.Plugins;
+ const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(data)});
+ await P.Filesystem.writeFile({path:filename,data:b64,directory:'CACHE'});
+ const u=await P.Filesystem.getUri({path:filename,directory:'CACHE'});
+ await P.Share.share({title:filename,url:u.uri});
+}})}}
+</script>
+<script>
+const $=s=>document.querySelector(s);
+const AC=new (window.AudioContext||window.webkitAudioContext)();
+const master=AC.createGain(), dest=AC.createMediaStreamDestination();
+master.connect(AC.destination); master.connect(dest);
+const cv=$('#cv'), g=cv.getContext('2d');
+let clips=[], tracks=[], sel=null, playing=false, head=0, base=0, t0=0, raf=0, exporting=false, rec=null, chunks=[], uid=0;
+const all=()=>clips.concat(tracks);
+const len=i=>i.end-i.start;
+const fmt=s=>{s=Math.max(0,s);return Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0')+'.'+Math.floor(s%1*10)};
+const vidLen=()=>clips.reduce((a,c)=>a+len(c),0);
+const total=()=>Math.max(vidLen(),...tracks.map(t=>t.at+len(t)),0);
+const say=t=>$('#msg').textContent=t||'';
+function layout(){let a=0;clips.forEach(c=>{c.at=a;a+=len(c)})}
+
+function addMedia(files,kind){
+  [...files].forEach(f=>{
+    const el=document.createElement(kind==='v'?'video':'audio');
+    el.preload='auto'; el.playsInline=true; el.src=URL.createObjectURL(f);
+    el.addEventListener('loadedmetadata',()=>{
+      const d=el.duration||0;
+      if(!isFinite(d)||d<=0){say(f.name+' padh nahi paya.');return}
+      const it={id:++uid,name:f.name,el,dur:d,start:0,end:d,vol:1,at:0,kind};
+      const src=AC.createMediaElementSource(el); it.gain=AC.createGain(); src.connect(it.gain); it.gain.connect(master);
+      (kind==='v'?clips:tracks).push(it);
+      if(kind==='v')el.addEventListener('seeked',draw);
+      sel=it; layout(); render(); seek(head);
+    },{once:true});
+    el.addEventListener('error',()=>say(f.name+' ka format browser me support nahi hai.'));
+  });
+}
+$('#fv').onchange=e=>{addMedia(e.target.files,'v');e.target.value=''};
+$('#fa').onchange=e=>{addMedia(e.target.files,'a');e.target.value=''};
+
+function active(){layout();return clips.find(c=>head>=c.at&&head<c.at+len(c)+(c===clips[clips.length-1]?.001:0))}
+function draw(){
+  g.fillStyle='#000';g.fillRect(0,0,1280,720);
+  const c=active(); if(!c)return;
+  const v=c.el, w=v.videoWidth,h=v.videoHeight; if(!w)return;
+  const s=Math.min(1280/w,720/h), dw=w*s, dh=h*s;
+  try{g.drawImage(v,(1280-dw)/2,(720-dh)/2,dw,dh)}catch(e){}
+}
+function sync(){
+  layout();
+  all().forEach(i=>{
+    const l=head-i.at, on=l>=0&&l<len(i), want=i.start+l;
+    i.gain.gain.value=i.vol;
+    if(on){
+      if(i.el.paused){i.el.currentTime=want;i.el.play().catch(()=>{})}
+      else if(Math.abs(i.el.currentTime-want)>.4)i.el.currentTime=want;
+    }else if(!i.el.paused)i.el.pause();
+  });
+}
+function tick(){
+  if(!playing)return;
+  head=base+(performance.now()-t0)/1000;
+  const T=total();
+  if(head>=T){head=T;stop();draw();ui();if(exporting)finish();return}
+  sync();draw();ui();raf=requestAnimationFrame(tick);
+}
+function play(){
+  if(!total())return;
+  if(AC.state==='suspended')AC.resume();
+  if(head>=total()-.05)head=0;
+  playing=true;base=head;t0=performance.now();$('#play').textContent='Pause';tick();
+}
+function stop(){playing=false;cancelAnimationFrame(raf);all().forEach(i=>i.el.pause());$('#play').textContent='Play'}
+function seek(t){
+  head=Math.min(Math.max(0,t),total());layout();
+  const c=active(); if(c)c.el.currentTime=c.start+(head-c.at);
+  all().forEach(i=>{if(i.kind==='a'&&!playing){const l=head-i.at;if(l>=0&&l<len(i))i.el.currentTime=i.start+l}});
+  draw();ui();
+}
+$('#play').onclick=()=>playing?stop():play();
+$('#scrub').oninput=e=>{const was=playing;stop();seek(+e.target.value);if(was)play()};
+
+function ui(){
+  const T=total(),s=$('#scrub');
+  s.max=T;s.value=head;$('#time').textContent=fmt(head)+' / '+fmt(T);
+  document.querySelectorAll('.ph').forEach(p=>p.style.left=(T?head/T*100:0)+'%');
+}
+function lane(el,items,cls){
+  el.innerHTML='';
+  const T=total()||1;
+  items.forEach(i=>{
+    const b=document.createElement('div');
+    b.className='blk '+cls+(i===sel?' on':'');
+    b.style.left=(i.at/T*100)+'%';b.style.width=Math.max(len(i)/T*100,2)+'%';
+    b.textContent=i.name;b.title=i.name+' · '+fmt(len(i));b.tabIndex=0;
+    b.onclick=()=>{sel=i;render()};
+    b.onkeydown=e=>{if(e.key==='Enter'){sel=i;render()}};
+    if(cls==='a')dragTrack(b,i,el);
+    el.appendChild(b);
+  });
+  const p=document.createElement('div');p.className='ph';el.appendChild(p);
+}
+function dragTrack(b,i,laneEl){
+  b.onpointerdown=e=>{
+    sel=i;const x0=e.clientX,a0=i.at,W=laneEl.clientWidth,T=total()||1;let moved=false;
+    b.setPointerCapture(e.pointerId);
+    b.onpointermove=m=>{moved=true;i.at=Math.max(0,a0+(m.clientX-x0)/W*T);b.style.left=(i.at/T*100)+'%'};
+    b.onpointerup=()=>{b.onpointermove=b.onpointerup=null;if(moved){render();seek(head)}else render()};
+  };
+}
+function render(){
+  layout();
+  lane($('#lv'),clips,'v');lane($('#la'),tracks,'a');
+  $('#vl').textContent=clips.length?clips.length+' clip · '+fmt(vidLen()):'';
+  $('#exp').disabled=!clips.length&&!tracks.length;
+  inspector();ui();
+}
+function slider(label,min,max,step,val,fn,suffix=''){
+  const r=document.createElement('div');r.className='row';
+  const l=document.createElement('label');l.textContent=label;
+  const inp=document.createElement('input');inp.type='range';inp.min=min;inp.max=max;inp.step=step;inp.value=val;
+  const o=document.createElement('output');o.textContent=fmtv(val,suffix);
+  inp.oninput=()=>{o.textContent=fmtv(inp.value,suffix);fn(+inp.value)};
+  r.append(l,inp,o);return r;
+}
+const fmtv=(v,s)=>s==='%'?Math.round(v*100)+'%':(+v).toFixed(1)+'s';
+function inspector(){
+  const box=$('#insp');
+  if(!sel||!all().includes(sel)){box.innerHTML='<p class="empty">Timeline par kisi block ko chuno aur trim / volume set karo.</p>';return}
+  const i=sel;box.innerHTML='';
+  const h=document.createElement('h2');h.textContent=(i.kind==='v'?'Video: ':'Audio: ')+i.name;box.appendChild(h);
+  const after=()=>{layout();render();seek(Math.min(head,total()))};
+  box.append(
+    slider('Start',0,i.dur,.1,i.start,v=>{i.start=Math.min(v,i.end-.2);after()}),
+    slider('End',0,i.dur,.1,i.end,v=>{i.end=Math.max(v,i.start+.2);after()}),
+    slider('Volume',0,1.5,.01,i.vol,v=>{i.vol=v;i.gain.gain.value=v},'%')
+  );
+  if(i.kind==='a')box.appendChild(slider('Kahan se shuru',0,Math.max(total(),i.at+10),.1,i.at,v=>{i.at=v;after()}));
+  const a=document.createElement('div');a.className='acts';
+  const mk=(t,f)=>{const b=document.createElement('button');b.textContent=t;b.onclick=f;a.appendChild(b)};
+  if(i.kind==='v'){
+    mk('Pehle le jao',()=>mv(-1));mk('Baad me le jao',()=>mv(1));
+    mk('Clip dobara jodo',()=>dup(i));
+  }
+  mk('Hatao',()=>{stop();const L=i.kind==='v'?clips:tracks;L.splice(L.indexOf(i),1);i.el.pause();sel=null;head=Math.min(head,total());render();draw()});
+  box.appendChild(a);
+}
+function mv(d){const k=clips.indexOf(sel),n=k+d;if(n<0||n>=clips.length)return;[clips[k],clips[n]]=[clips[n],clips[k]];layout();render();seek(head)}
+function dup(i){
+  const el=i.el.cloneNode();el.preload='auto';el.playsInline=true;
+  const c={...i,id:++uid,el,name:i.name};
+  const src=AC.createMediaElementSource(el);c.gain=AC.createGain();c.gain.gain.value=i.vol;src.connect(c.gain);c.gain.connect(master);
+  el.addEventListener('seeked',draw);
+  clips.splice(clips.indexOf(i)+1,0,c);sel=c;layout();render();seek(head);
+}
+
+/* Export */
+$('#exp').onclick=()=>{
+  if(!total())return;
+  if(typeof MediaRecorder==='undefined'){say('Is browser me export support nahi hai. Chrome ya Edge try karo.');return}
+  stop();head=0;layout();say('Export chal raha hai… poora video real-time me record hota hai, isliye wait karo.');
+  $('#exp').disabled=true;$('#out').innerHTML='';
+  const st=cv.captureStream(30);dest.stream.getAudioTracks().forEach(t=>st.addTrack(t));
+  const mt=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm','video/mp4'].find(m=>MediaRecorder.isTypeSupported(m));
+  rec=new MediaRecorder(st,mt?{mimeType:mt}:undefined);chunks=[];
+  rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+  rec.onstop=done;exporting=true;rec.start(250);seek(0);play();
+};
+function finish(){exporting=false;setTimeout(()=>rec.state!=='inactive'&&rec.stop(),300)}
+function done(){
+  const type=rec.mimeType||'video/webm',blob=new Blob(chunks,{type}),ext=type.includes('mp4')?'mp4':'webm';
+  const url=URL.createObjectURL(blob),o=$('#out');
+  o.innerHTML='<video controls playsinline></video><div class="acts"><button class="pri" id="dl">Video save karo (.'+ext+')</button></div>';
+  o.querySelector('video').src=url;
+  $('#dl').onclick=async()=>{
+    try{const d=await claude.use('downloads');if(!d){say('Save yahan available nahi hai — upar wale video par long-press / right-click karke save karo.');return}
+      await d.save({filename:'clip-mixer-export.'+ext,data:blob});say('Save ho gaya.')}
+    catch(e){say(e&&e.code==='declined'?'Save cancel hua.':'Save nahi ho paya: '+(e&&e.message||e))}
+  };
+  $('#exp').disabled=false;say('Export taiyaar hai.');seek(0);
+}
+draw();ui();
+</script>
+</body>
+</html>
