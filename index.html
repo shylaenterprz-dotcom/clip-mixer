@@ -57,6 +57,7 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
 <div class="bar" style="flex-wrap:wrap">
   <label class="btn">Video clips jodo<input id="fv" type="file" accept="video/*" multiple></label>
   <label class="btn">Audio jodo<input id="fa" type="file" accept="audio/*" multiple></label>
+  <button id="cut">Playhead par kaato</button>
   <button id="exp" disabled>Export video</button>
 </div>
 
@@ -67,7 +68,10 @@ input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
   <div class="lane" id="la"></div>
 </div>
 
-<div class="insp" id="insp"><p class="empty">Pehle video clips ya audio jodo, fir timeline par kisi block ko chuno aur trim / volume set karo.</p></div>
+<div class="insp" id="insp"><p class="empty">Pehle video clips ya audio jodo, fir timeline par kisi block ko chuno aur trim / volume / fade set karo.</p></div>
+<div class="insp"><h2>Text / title</h2>
+<div class="row" style="grid-template-columns:92px 1fr"><label for="tx">Text likho</label><input id="tx" type="text" placeholder="Video par dikhne wala text" style="font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);width:100%"></div>
+<div id="txs"></div></div>
 <p class="msg" id="msg"></p>
 <div class="out" id="out"></div>
 </main>
@@ -90,7 +94,7 @@ master.connect(AC.destination); master.connect(dest);
 const cv=$('#cv'), g=cv.getContext('2d');
 let clips=[], tracks=[], sel=null, playing=false, head=0, base=0, t0=0, raf=0, exporting=false, rec=null, chunks=[], uid=0;
 const all=()=>clips.concat(tracks);
-const len=i=>i.end-i.start;
+const len=i=>(i.end-i.start)/(i.sp||1);
 const fmt=s=>{s=Math.max(0,s);return Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0')+'.'+Math.floor(s%1*10)};
 const vidLen=()=>clips.reduce((a,c)=>a+len(c),0);
 const total=()=>Math.max(vidLen(),...tracks.map(t=>t.at+len(t)),0);
@@ -104,7 +108,7 @@ function addMedia(files,kind){
     el.addEventListener('loadedmetadata',()=>{
       const d=el.duration||0;
       if(!isFinite(d)||d<=0){say(f.name+' padh nahi paya.');return}
-      const it={id:++uid,name:f.name,el,dur:d,start:0,end:d,vol:1,at:0,kind};
+      const it={id:++uid,name:f.name,el,dur:d,start:0,end:d,vol:1,at:0,fi:0,fo:0,sp:1,file:f,kind};
       const src=AC.createMediaElementSource(el); it.gain=AC.createGain(); src.connect(it.gain); it.gain.connect(master);
       (kind==='v'?clips:tracks).push(it);
       if(kind==='v')el.addEventListener('seeked',draw);
@@ -117,18 +121,21 @@ $('#fv').onchange=e=>{addMedia(e.target.files,'v');e.target.value=''};
 $('#fa').onchange=e=>{addMedia(e.target.files,'a');e.target.value=''};
 
 function active(){layout();return clips.find(c=>head>=c.at&&head<c.at+len(c)+(c===clips[clips.length-1]?.001:0))}
-function draw(){
+function draw(){drawVid();drawText()}
+function drawVid(){
   g.fillStyle='#000';g.fillRect(0,0,1280,720);
   const c=active(); if(!c)return;
-  const v=c.el, w=v.videoWidth,h=v.videoHeight; if(!w)return;
-  const s=Math.min(1280/w,720/h), dw=w*s, dh=h*s;
-  try{g.drawImage(v,(1280-dw)/2,(720-dh)/2,dw,dh)}catch(e){}
+  let v=c.el;if(c.rev&&c.fr)v=c.fr[Math.min(c.fr.length-1,Math.max(0,Math.floor((c.end-(head-c.at)*(c.sp||1))*c.fps)))];
+  const w=v.videoWidth||v.width,h=v.videoHeight||v.height; if(!w)return;
+  const q=(c.rot||0)%180!==0, s=Math.min(1280/(q?h:w),720/(q?w:h)), dw=w*s, dh=h*s;
+  g.globalAlpha=Math.max(0,fade(c,head-c.at));g.save();g.filter=filt(c);g.translate(640,360);g.rotate((c.rot||0)*Math.PI/180);g.scale(c.flip?-1:1,1);try{g.drawImage(v,-dw/2,-dh/2,dw,dh)}catch(e){}g.restore();g.globalAlpha=1;
 }
 function sync(){
   layout();
   all().forEach(i=>{
-    const l=head-i.at, on=l>=0&&l<len(i), want=i.start+l;
-    i.gain.gain.value=i.vol;
+    const l=head-i.at, on=l>=0&&l<len(i), want=i.start+l*(i.sp||1);
+    i.gain.gain.value=i.vol*(on?Math.max(0,fade(i,l)):1);i.el.playbackRate=i.sp||1;
+    if(i.rev){revSync(i,l,on);return}
     if(on){
       if(i.el.paused){i.el.currentTime=want;i.el.play().catch(()=>{})}
       else if(Math.abs(i.el.currentTime-want)>.4)i.el.currentTime=want;
@@ -148,11 +155,11 @@ function play(){
   if(head>=total()-.05)head=0;
   playing=true;base=head;t0=performance.now();$('#play').textContent='Pause';tick();
 }
-function stop(){playing=false;cancelAnimationFrame(raf);all().forEach(i=>i.el.pause());$('#play').textContent='Play'}
+function stop(){playing=false;cancelAnimationFrame(raf);all().forEach(i=>{i.el.pause();if(i.bs){try{i.bs.stop()}catch(e){}i.bs=null}});$('#play').textContent='Play'}
 function seek(t){
   head=Math.min(Math.max(0,t),total());layout();
-  const c=active(); if(c)c.el.currentTime=c.start+(head-c.at);
-  all().forEach(i=>{if(i.kind==='a'&&!playing){const l=head-i.at;if(l>=0&&l<len(i))i.el.currentTime=i.start+l}});
+  const c=active(); if(c)c.el.currentTime=c.start+(head-c.at)*(c.sp||1);
+  all().forEach(i=>{if(i.kind==='a'&&!playing){const l=head-i.at;if(l>=0&&l<len(i))i.el.currentTime=i.start+l*(i.sp||1)}});
   draw();ui();
 }
 $('#play').onclick=()=>playing?stop():play();
@@ -170,7 +177,7 @@ function lane(el,items,cls){
     const b=document.createElement('div');
     b.className='blk '+cls+(i===sel?' on':'');
     b.style.left=(i.at/T*100)+'%';b.style.width=Math.max(len(i)/T*100,2)+'%';
-    b.textContent=i.name;b.title=i.name+' · '+fmt(len(i));b.tabIndex=0;
+    b.textContent=(i.rev?'⟲ ':'')+i.name;b.title=i.name+' · '+fmt(len(i));b.tabIndex=0;
     b.onclick=()=>{sel=i;render()};
     b.onkeydown=e=>{if(e.key==='Enter'){sel=i;render()}};
     if(cls==='a')dragTrack(b,i,el);
@@ -201,24 +208,39 @@ function slider(label,min,max,step,val,fn,suffix=''){
   inp.oninput=()=>{o.textContent=fmtv(inp.value,suffix);fn(+inp.value)};
   r.append(l,inp,o);return r;
 }
-const fmtv=(v,s)=>s==='%'?Math.round(v*100)+'%':(+v).toFixed(1)+'s';
+const fmtv=(v,s)=>s==='%'?Math.round(v*100)+'%':s==='px'?Math.round(v):s==='x'?(+v).toFixed(2)+'x':(+v).toFixed(1)+'s';
 function inspector(){
   const box=$('#insp');
   if(!sel||!all().includes(sel)){box.innerHTML='<p class="empty">Timeline par kisi block ko chuno aur trim / volume set karo.</p>';return}
   const i=sel;box.innerHTML='';
   const h=document.createElement('h2');h.textContent=(i.kind==='v'?'Video: ':'Audio: ')+i.name;box.appendChild(h);
-  const after=()=>{layout();render();seek(Math.min(head,total()))};
+  const after=()=>{layout();lane($('#lv'),clips,'v');lane($('#la'),tracks,'a');$('#vl').textContent=clips.length?clips.length+' clip · '+fmt(vidLen()):'';ui();seek(Math.min(head,total()))};
   box.append(
     slider('Start',0,i.dur,.1,i.start,v=>{i.start=Math.min(v,i.end-.2);after()}),
     slider('End',0,i.dur,.1,i.end,v=>{i.end=Math.max(v,i.start+.2);after()}),
-    slider('Volume',0,1.5,.01,i.vol,v=>{i.vol=v;i.gain.gain.value=v},'%')
+    slider('Volume',0,1.5,.01,i.vol,v=>{i.vol=v;i.gain.gain.value=v},'%'),
+    slider('Fade in',0,Math.min(5,len(i)/2),.1,i.fi,v=>{i.fi=v;draw()}),
+    slider('Fade out',0,Math.min(5,len(i)/2),.1,i.fo,v=>{i.fo=v;draw()}),
+    slider('Speed',0.25,4,.05,i.sp||1,v=>{i.sp=v;after()},'x')
   );
+  if(i.kind==='v'){
+    const r=document.createElement('div');r.className='row';
+    const l=document.createElement('label');l.textContent='Filter';
+    const s=document.createElement('select');s.style.cssText='font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)';
+    [['','Normal'],['bw','Black & white'],['sepia','Sepia'],['warm','Warm'],['cool','Cool'],['vivid','Vivid'],['blur','Blur'],['invert','Invert']].forEach(([k,n])=>{const o=new Option(n,k);o.selected=(i.fx||'')===k;s.add(o)});
+    s.onchange=()=>{i.fx=s.value;draw()};
+    r.append(l,s);box.appendChild(r);
+    box.append(slider('Brightness',.4,1.8,.05,i.br??1,v=>{i.br=v;draw()},'x'),slider('Contrast',.4,1.8,.05,i.co??1,v=>{i.co=v;draw()},'x'),slider('Saturation',0,2,.05,i.sa??1,v=>{i.sa=v;draw()},'x'));
+  }
   if(i.kind==='a')box.appendChild(slider('Kahan se shuru',0,Math.max(total(),i.at+10),.1,i.at,v=>{i.at=v;after()}));
   const a=document.createElement('div');a.className='acts';
   const mk=(t,f)=>{const b=document.createElement('button');b.textContent=t;b.onclick=f;a.appendChild(b)};
+  mk('Playhead par kaato',cut);
+  mk(i.rev?'Ulta band karo':'Ulta chalao',toggleRev);
   if(i.kind==='v'){
     mk('Pehle le jao',()=>mv(-1));mk('Baad me le jao',()=>mv(1));
     mk('Clip dobara jodo',()=>dup(i));
+    mk('Flip',()=>{i.flip=!i.flip;draw()});mk('Rotate 90°',()=>{i.rot=((i.rot||0)+90)%360;draw()});
   }
   mk('Hatao',()=>{stop();const L=i.kind==='v'?clips:tracks;L.splice(L.indexOf(i),1);i.el.pause();sel=null;head=Math.min(head,total());render();draw()});
   box.appendChild(a);
@@ -226,7 +248,7 @@ function inspector(){
 function mv(d){const k=clips.indexOf(sel),n=k+d;if(n<0||n>=clips.length)return;[clips[k],clips[n]]=[clips[n],clips[k]];layout();render();seek(head)}
 function dup(i){
   const el=i.el.cloneNode();el.preload='auto';el.playsInline=true;
-  const c={...i,id:++uid,el,name:i.name};
+  const c={...i,id:++uid,el,name:i.name,bs:null};
   const src=AC.createMediaElementSource(el);c.gain=AC.createGain();c.gain.gain.value=i.vol;src.connect(c.gain);c.gain.connect(master);
   el.addEventListener('seeked',draw);
   clips.splice(clips.indexOf(i)+1,0,c);sel=c;layout();render();seek(head);
@@ -257,6 +279,85 @@ function done(){
   };
   $('#exp').disabled=false;say('Export taiyaar hai.');seek(0);
 }
+/* color filters */
+const FX={bw:'grayscale(1)',sepia:'sepia(1)',warm:'sepia(.35) saturate(1.3)',cool:'hue-rotate(25deg) saturate(1.1)',vivid:'saturate(1.8) contrast(1.1)',blur:'blur(6px)',invert:'invert(1)'};
+const filt=c=>{const b=c.br??1,k=c.co??1,s=c.sa??1;if(b===1&&k===1&&s===1&&!c.fx)return 'none';return 'brightness('+b+') contrast('+k+') saturate('+s+') '+(FX[c.fx||'']||'')};
+/* fade + text overlay */
+const fade=(i,l)=>{const L=len(i);return Math.min(1,i.fi>0?l/i.fi:1,i.fo>0?(L-l)/i.fo:1)};
+const txt={text:'',start:0,dur:3,size:64,y:85};
+function drawText(){
+  if(!txt.text||head<txt.start||head>txt.start+txt.dur)return;
+  g.font='700 '+txt.size+'px "Bricolage Grotesque",system-ui,sans-serif';g.textAlign='center';g.lineJoin='round';
+  g.lineWidth=txt.size/6;g.strokeStyle='rgba(0,0,0,.75)';g.fillStyle='#fff';
+  const y=720*txt.y/100;g.strokeText(txt.text,640,y,1200);g.fillText(txt.text,640,y,1200);
+}
+/* reverse: frames for video, reversed audio buffer for sound */
+const once=(el,ev)=>new Promise(r=>{const t=setTimeout(r,3000);el.addEventListener(ev,()=>{clearTimeout(t);r()},{once:true})});
+function revSync(i,l,on){
+  if(!i.el.paused)i.el.pause();
+  if(!i.abuf)return;
+  if(on&&!i.bs){
+    const s=AC.createBufferSource();s.buffer=i.abuf;s.playbackRate.value=i.sp||1;s.connect(i.gain);
+    s.start(0,Math.min(Math.max(0,i.abuf.duration-i.end+l*(i.sp||1)),i.abuf.duration-.01));i.bs=s;
+  }else if(!on&&i.bs){try{i.bs.stop()}catch(e){}i.bs=null}
+}
+async function revAudio(i){
+  const b=await AC.decodeAudioData(await i.file.arrayBuffer());
+  for(let c=0;c<b.numberOfChannels;c++)b.getChannelData(c).reverse();
+  return b;
+}
+async function grab(i){
+  const v=document.createElement('video');v.muted=true;v.playsInline=true;v.src=i.el.src;
+  await once(v,'loadeddata');
+  const fps=Math.min(12,400/i.dur),n=Math.max(1,Math.floor(i.dur*fps)),s=Math.min(1,640/v.videoWidth);
+  const cn=document.createElement('canvas');cn.width=Math.round(v.videoWidth*s);cn.height=Math.round(v.videoHeight*s);
+  const x=cn.getContext('2d'),fr=[];
+  for(let k=0;k<n;k++){
+    v.currentTime=Math.min(i.dur-.01,(k+.5)/fps);await once(v,'seeked');
+    x.drawImage(v,0,0,cn.width,cn.height);fr.push(await createImageBitmap(cn));
+    if(k%4===0)say('Reverse ban raha hai… '+Math.round(k/n*100)+'%');
+  }
+  i.fr=fr;i.fps=fps;
+}
+async function toggleRev(){
+  const i=sel;if(!i)return;stop();
+  if(i.rev){i.rev=false;render();seek(head);say('Reverse band hai.');return}
+  say('Reverse taiyaar ho raha hai… lamba clip ho to thoda time lagta hai.');
+  try{
+    if(i.abuf===undefined)i.abuf=await revAudio(i).catch(()=>false);
+    if(i.kind==='a'&&!i.abuf)throw new Error('audio decode nahi ho paya');
+    if(i.kind==='v'&&!i.fr)await grab(i);
+    i.rev=true;render();seek(head);say('Clip ab ulta chalega. Play karke dekho.');
+  }catch(e){say('Reverse nahi ho paya: '+(e&&e.message||e))}
+}
+/* clip cutting: split at playhead */
+function cut(){
+  layout();
+  let i=sel;
+  if(!i||!(head>i.at&&head<i.at+len(i)))i=active();
+  if(!i){say('Pehle clip jodo aur playhead ko us jagah le jao jahan kaatna hai.');return}
+  const l=head-i.at;
+  if(!(l>.1&&l<len(i)-.1)){say('Playhead clip ke bilkul shuru ya end par hai. Slider ko clip ke beech me le jao.');return}
+  stop();
+  const pt=i.rev?i.end-l*(i.sp||1):i.start+l*(i.sp||1);
+  const el=i.el.cloneNode();el.preload='auto';el.playsInline=true;
+  const c={...i,id:++uid,el,fi:0,bs:null};
+  if(i.rev){c.end=pt;i.start=pt}else{c.start=pt;i.end=pt}
+  i.fo=0;
+  const src=AC.createMediaElementSource(el);c.gain=AC.createGain();c.gain.gain.value=i.vol;src.connect(c.gain);c.gain.connect(master);
+  if(i.kind==='v'){el.addEventListener('seeked',draw);clips.splice(clips.indexOf(i)+1,0,c)}
+  else{c.at=i.at+len(i);tracks.push(c)}
+  sel=c;layout();render();seek(head);
+  say('Clip '+fmt(head)+' par do hisso me kat gaya. Ab dono alag clips hain, jo hatana ho use chuno aur Hatao dabao.');
+}
+$('#cut').onclick=cut;
+$('#tx').oninput=e=>{txt.text=e.target.value;draw()};
+$('#txs').append(
+  slider('Kab dikhe',0,120,.1,0,v=>{txt.start=v;draw()}),
+  slider('Kitni der',0.5,30,.1,3,v=>{txt.dur=v;draw()}),
+  slider('Size',20,140,1,64,v=>{txt.size=v;draw()},'px'),
+  slider('Upar-neeche',10,95,1,85,v=>{txt.y=v;draw()},'px')
+);
 draw();ui();
 </script>
 </body>
